@@ -26,6 +26,7 @@ from gpiozero import Button, AngularServo
 from gpiozero.pins.pigpio import PiGPIOFactory
 from smbus2 import SMBus
 from ticlib import TicI2C, SMBus2Backend
+from PIL import Image, ImageTk
 # # ── hardware imports ────────────────────────────────────────────────────────
 
 
