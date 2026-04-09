@@ -438,15 +438,6 @@ class LoginWindow:
         # Hint
         hint = tk.Frame(inner, bg=self.PANEL)
         hint.pack(fill=tk.X, pady=(20, 0))
-        tk.Label(hint, text="Demo accounts:",
-                 bg=self.PANEL, fg=self.MUTED,
-                 font=("Courier New", 8)).pack(anchor="w")
-        tk.Label(hint, text="  admin / admin123",
-                 bg=self.PANEL, fg=self.MUTED,
-                 font=("Courier New", 8)).pack(anchor="w")
-        tk.Label(hint, text="  operator / operator456",
-                 bg=self.PANEL, fg=self.MUTED,
-                 font=("Courier New", 8)).pack(anchor="w")
 
         # bind Enter key
         root.bind("<Return>", lambda _e: self._attempt_login())
