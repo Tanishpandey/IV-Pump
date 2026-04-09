@@ -22,19 +22,19 @@ from datetime import datetime
 
 # DB module (same directory)
 import db
+from gpiozero import Button, AngularServo
+from gpiozero.pins.pigpio import PiGPIOFactory
+from smbus2 import SMBus
+from ticlib import TicI2C, SMBus2Backend
+# # ── hardware imports ────────────────────────────────────────────────────────
 
-# ── hardware imports ────────────────────────────────────────────────────────
-try:
-    from gpiozero import Button, AngularServo
-    from gpiozero.pins.pigpio import PiGPIOFactory
-    from smbus2 import SMBus
-    from ticlib import TicI2C, SMBus2Backend
-    HW_AVAILABLE = True
-except ImportError:
-    HW_AVAILABLE = False
-    print("[warn] Hardware libraries not found – running in UI-only mode")
 
-from PIL import Image, ImageTk
+#     HW_AVAILABLE = True
+# except ImportError:
+#     HW_AVAILABLE = False
+#     print("[warn] Hardware libraries not found – running in UI-only mode")
+
+# from PIL import Image, ImageTk
 
 
 # ============================================================================
