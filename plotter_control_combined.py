@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """
-XY Plotter Control System - Combined Version (with Auth + Button Logging)
-
-Changes vs original:
-  - Login screen on startup (SQLite-backed, two dummy accounts)
-  - Every button press is logged to the database (user, coords, timestamp)
-  - Log Viewer tab to inspect press history without leaving the app
+XY Plotter Control System - Combined Version
+(Auth + Button Logging + IP Camera Sidebar)
 
 Run:  python3 plotter_control_combined.py
-DB:   plotter.db  (created automatically next to this file)
+DB:   plotter.db  (auto-created next to this file)
 """
 
 import math
@@ -19,27 +15,27 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 from typing import Tuple, Optional
 from datetime import datetime
+import urllib.request
+import io
+import queue
 
-# DB module (same directory)
 import db
-from gpiozero import Button, AngularServo
-from gpiozero.pins.pigpio import PiGPIOFactory
-from smbus2 import SMBus
-from ticlib import TicI2C, SMBus2Backend
+
+try:
+    from gpiozero import Button, AngularServo
+    from gpiozero.pins.pigpio import PiGPIOFactory
+    from smbus2 import SMBus
+    from ticlib import TicI2C, SMBus2Backend
+    HW_AVAILABLE = True
+except ImportError:
+    HW_AVAILABLE = False
+    print("[warn] Hardware libraries not found – running in UI-only mode")
+
 from PIL import Image, ImageTk
-# # ── hardware imports ────────────────────────────────────────────────────────
-
-
-#     HW_AVAILABLE = True
-# except ImportError:
-#     HW_AVAILABLE = False
-#     print("[warn] Hardware libraries not found – running in UI-only mode")
-
-# from PIL import Image, ImageTk
 
 
 # ============================================================================
-# XYPlotter  (unchanged logic, added nothing here)
+# XYPlotter
 # ============================================================================
 
 class XYPlotter:
@@ -133,7 +129,6 @@ class XYPlotter:
         return limit_switch.is_pressed
 
     def home_and_calibrate(self, x_backoff_mm=5.0, y_backoff_mm=5.0):
-        print("Starting homing and calibration sequence...")
         self.x_tic.set_max_speed(self.homing_speed_tics)
         self.y_tic.set_max_speed(self.homing_speed_tics)
         self._home_axis_to_minimum(self.x_tic, self.x_limit_min, "X")
@@ -195,8 +190,7 @@ class XYPlotter:
         if not self.is_calibrated:
             raise RuntimeError("Plotter must be calibrated first.")
         if check_bounds and not self.is_within_bounds(x_mm, y_mm):
-            raise ValueError(f"Position ({x_mm}, {y_mm}) out of bounds. "
-                             f"Valid: 0–{self.x_max_mm:.2f}, 0–{self.y_max_mm:.2f}")
+            raise ValueError(f"Position ({x_mm}, {y_mm}) out of bounds.")
         self.x_tic.set_target_position(int(x_mm * self.x_tics_per_mm))
         self.y_tic.set_target_position(int(y_mm * self.y_tics_per_mm))
         self._wait_for_movement(self.x_tic)
@@ -230,7 +224,7 @@ class XYPlotter:
         if servo_num not in [1, 2]:
             raise ValueError("servo_num must be 1 or 2")
         if not 0 <= angle <= self.servo_tics_per_revolution:
-            raise ValueError(f"Angle must be 0–{self.servo_tics_per_revolution}")
+            raise ValueError(f"Angle must be 0-{self.servo_tics_per_revolution}")
         if servo_num == 1:
             self.servo1.angle = angle
             self.servo1_position = angle
@@ -331,57 +325,37 @@ class XYPlotter:
 # ============================================================================
 
 class LoginWindow:
-    """
-    Blocking login dialog shown before the main GUI.
-    Sets self.user to the authenticated user row on success.
-    """
-
-    # ── palette ──────────────────────────────────────────────────────────────
     BG       = "#0f1117"
     PANEL    = "#1a1d27"
     ACCENT   = "#4f8ef7"
-    ACCENT2  = "#7c3aed"
     TEXT     = "#e8eaf0"
     MUTED    = "#6b7280"
     ERROR    = "#ef4444"
-    SUCCESS  = "#22c55e"
     BORDER   = "#2d3148"
     ENTRY_BG = "#252839"
 
     def __init__(self):
-        self.user = None           # filled on successful login
+        self.user = None
         self.root = tk.Tk()
         self.root.title("XY Plotter — Sign In")
         self.root.resizable(False, False)
         self.root.configure(bg=self.BG)
-
-        # Centre window
         w, h = 420, 480
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
         self.root.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
-
         self._build()
 
-    # ── UI ───────────────────────────────────────────────────────────────────
-
     def _build(self):
-        root = self.root
-
-        # ── outer padding frame ──────────────────────────────────────────────
-        outer = tk.Frame(root, bg=self.BG)
+        outer = tk.Frame(self.root, bg=self.BG)
         outer.pack(expand=True, fill=tk.BOTH, padx=40, pady=30)
 
-        # ── logo / title area ────────────────────────────────────────────────
         logo_frame = tk.Frame(outer, bg=self.BG)
         logo_frame.pack(fill=tk.X, pady=(0, 24))
-
-        # simple geometric "logo"
         c = tk.Canvas(logo_frame, width=48, height=48,
                       bg=self.BG, highlightthickness=0)
         c.pack()
-        c.create_rectangle(4, 4, 44, 44, fill=self.ACCENT2,
-                            outline="", width=0)
+        c.create_rectangle(4, 4, 44, 44, fill="#7c3aed", outline="", width=0)
         c.create_line(14, 24, 34, 24, fill="white", width=2)
         c.create_line(24, 14, 24, 34, fill="white", width=2)
         c.create_oval(20, 20, 28, 28, fill="white", outline="")
@@ -393,130 +367,105 @@ class LoginWindow:
                  bg=self.BG, fg=self.MUTED,
                  font=("Courier New", 10)).pack()
 
-        # ── card panel ───────────────────────────────────────────────────────
         card = tk.Frame(outer, bg=self.PANEL,
-                        highlightbackground=self.BORDER,
-                        highlightthickness=1)
+                        highlightbackground=self.BORDER, highlightthickness=1)
         card.pack(fill=tk.BOTH, expand=True)
-
         inner = tk.Frame(card, bg=self.PANEL)
         inner.pack(fill=tk.BOTH, expand=True, padx=28, pady=28)
 
-        # Username
         tk.Label(inner, text="USERNAME", bg=self.PANEL, fg=self.MUTED,
-                 font=("Courier New", 9, "bold"),
-                 anchor="w").pack(fill=tk.X)
+                 font=("Courier New", 9, "bold"), anchor="w").pack(fill=tk.X)
         self._username = tk.StringVar()
-        self._make_entry(inner, self._username, show=None).pack(
-            fill=tk.X, pady=(4, 14))
+        self._make_entry(inner, self._username, show=None).pack(fill=tk.X, pady=(4, 14))
 
-        # Password
         tk.Label(inner, text="PASSWORD", bg=self.PANEL, fg=self.MUTED,
-                 font=("Courier New", 9, "bold"),
-                 anchor="w").pack(fill=tk.X)
+                 font=("Courier New", 9, "bold"), anchor="w").pack(fill=tk.X)
         self._password = tk.StringVar()
-        self._make_entry(inner, self._password, show="●").pack(
-            fill=tk.X, pady=(4, 6))
+        self._make_entry(inner, self._password, show="●").pack(fill=tk.X, pady=(4, 6))
 
-        # Error label (hidden until needed)
         self._err_label = tk.Label(inner, text="", bg=self.PANEL,
-                                   fg=self.ERROR,
-                                   font=("Courier New", 9))
+                                   fg=self.ERROR, font=("Courier New", 9))
         self._err_label.pack(fill=tk.X, pady=(0, 14))
 
-        # Sign-in button
         self._login_btn = tk.Button(
             inner, text="SIGN IN",
             bg=self.ACCENT, fg="white",
             activebackground="#3b74e0", activeforeground="white",
             font=("Courier New", 11, "bold"),
-            relief=tk.FLAT, cursor="hand2",
-            padx=0, pady=10,
-            command=self._attempt_login,
-        )
+            relief=tk.FLAT, cursor="hand2", padx=0, pady=10,
+            command=self._attempt_login)
         self._login_btn.pack(fill=tk.X)
 
-        # Hint
         hint = tk.Frame(inner, bg=self.PANEL)
         hint.pack(fill=tk.X, pady=(20, 0))
+        tk.Label(hint, text="Demo accounts:", bg=self.PANEL, fg=self.MUTED,
+                 font=("Courier New", 8)).pack(anchor="w")
+        tk.Label(hint, text="  admin / admin123", bg=self.PANEL, fg=self.MUTED,
+                 font=("Courier New", 8)).pack(anchor="w")
+        tk.Label(hint, text="  operator / operator456", bg=self.PANEL, fg=self.MUTED,
+                 font=("Courier New", 8)).pack(anchor="w")
 
-        # bind Enter key
-        root.bind("<Return>", lambda _e: self._attempt_login())
+        self.root.bind("<Return>", lambda _e: self._attempt_login())
 
     def _make_entry(self, parent, textvariable, show):
         frame = tk.Frame(parent, bg=self.ENTRY_BG,
-                         highlightbackground=self.BORDER,
-                         highlightthickness=1)
-        e = tk.Entry(frame, textvariable=textvariable,
-                     show=show or "",
-                     bg=self.ENTRY_BG, fg=self.TEXT,
-                     insertbackground=self.TEXT,
-                     font=("Courier New", 12),
-                     relief=tk.FLAT, bd=0)
+                         highlightbackground=self.BORDER, highlightthickness=1)
+        e = tk.Entry(frame, textvariable=textvariable, show=show or "",
+                     bg=self.ENTRY_BG, fg=self.TEXT, insertbackground=self.TEXT,
+                     font=("Courier New", 12), relief=tk.FLAT, bd=0)
         e.pack(fill=tk.X, padx=10, pady=8)
-        # focus highlight
         e.bind("<FocusIn>",  lambda _: frame.config(highlightbackground=self.ACCENT))
         e.bind("<FocusOut>", lambda _: frame.config(highlightbackground=self.BORDER))
         return frame
 
-    # ── logic ────────────────────────────────────────────────────────────────
-
     def _attempt_login(self):
         username = self._username.get().strip()
         password = self._password.get()
-
         if not username or not password:
-            self._show_error("Please enter username and password.")
+            self._err_label.config(text="⚠  Please enter username and password.")
             return
-
         self._login_btn.config(text="Checking…", state=tk.DISABLED)
         self.root.update_idletasks()
-
         user = db.authenticate(username, password)
         if user:
             self.user = dict(user)
             self.root.destroy()
         else:
             self._login_btn.config(text="SIGN IN", state=tk.NORMAL)
-            self._show_error("Invalid username or password.")
+            self._err_label.config(text="⚠  Invalid username or password.")
             self._password.set("")
-
-    def _show_error(self, msg):
-        self._err_label.config(text=f"⚠  {msg}")
 
     def run(self):
         self.root.mainloop()
-        return self.user  # None if window was closed without login
+        return self.user
 
 
 # ============================================================================
-# PlotterControlGUI  (with session user + button logging)
+# PlotterControlGUI
 # ============================================================================
 
 class PlotterControlGUI:
-    """
-    Main plotter control GUI.
+    """Main plotter control GUI with Auth, Button Logging, and IP Camera sidebar."""
 
-    Requires a user dict (from db.authenticate) so every button press
-    is attributed to the logged-in account.
-    """
+    # ── Camera constants ──────────────────────────────────────────────────────
+    CAM_W = 280          # sidebar display width (px)
+    CAM_H = 210          # sidebar display height (px)
+    CAM_FPS_TARGET = 15  # target poll rate
 
     def __init__(self, plotter_config: dict, current_user: dict):
         self.root = tk.Tk()
-        self.root.title(
-            f"XY Plotter Control  ·  {current_user['display_name']}"
-        )
+        self.root.title(f"XY Plotter Control  ·  {current_user['display_name']}")
 
-        self.plotter_config = plotter_config
-        self.current_user   = current_user      # ← logged-in user dict
+        self.plotter_config      = plotter_config
+        self.current_user        = current_user
 
         self.plotter             = None
         self.plotter_initialized = False
         self.is_homed            = False
 
-        self.image        = None
-        self.image_tk     = None
-        self.image_path   = None
+        self.image          = None
+        self.image_tk       = None
+        self.image_path     = None
         self.real_width_mm  = None
         self.real_height_mm = None
         self.scale_factor   = 1.0
@@ -531,42 +480,48 @@ class PlotterControlGUI:
         self.offset_x       = tk.DoubleVar(value=0.0)
         self.offset_y       = tk.DoubleVar(value=0.0)
 
+        # ── camera state ──────────────────────────────────────────────────────
+        self._cam_url         = tk.StringVar(value="")
+        self._cam_running     = False
+        self._cam_thread      = None
+        self._cam_frame_queue = queue.Queue(maxsize=2)
+        self._cam_photo       = None   # keep PhotoImage ref alive
+        self._cam_after_id    = None   # root.after handle for UI poll
+        self._cam_status      = tk.StringVar(value="Disconnected")
+        self._cam_fps_counter = 0
+        self._cam_fps_display = tk.StringVar(value="— fps")
+        self._cam_fps_ts      = time.time()
+
         self._create_ui()
 
-    # ── layout ───────────────────────────────────────────────────────────────
+    # =========================================================================
+    # UI construction
+    # =========================================================================
 
     def _create_ui(self):
-        # Top bar with user info + logout
+        # Top bar
         topbar = tk.Frame(self.root, bg="#1a1d27", height=36)
         topbar.pack(fill=tk.X, side=tk.TOP)
         topbar.pack_propagate(False)
-
-        tk.Label(topbar, text="XY PLOTTER",
-                 bg="#1a1d27", fg="#4f8ef7",
+        tk.Label(topbar, text="XY PLOTTER", bg="#1a1d27", fg="#4f8ef7",
                  font=("Courier New", 10, "bold")).pack(side=tk.LEFT, padx=14, pady=8)
-
         tk.Label(topbar,
-                 text=f"👤  {self.current_user['display_name']}  "
-                      f"({self.current_user['username']})",
+                 text=f"👤  {self.current_user['display_name']}  ({self.current_user['username']})",
                  bg="#1a1d27", fg="#9ca3af",
                  font=("Courier New", 9)).pack(side=tk.RIGHT, padx=14, pady=8)
 
-        # Notebook for main + log tabs
+        # Notebook
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        # Tab 1: plotter control
         control_tab = ttk.Frame(self.notebook)
         self.notebook.add(control_tab, text="  Plotter Control  ")
 
-        # Tab 2: button log
         log_tab = ttk.Frame(self.notebook)
         self.notebook.add(log_tab, text="  Button Log  ")
 
         self._build_control_tab(control_tab)
         self._build_log_tab(log_tab)
-
-        # Refresh log when switching to it
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_change)
 
     # ── Tab 1: Plotter Control ────────────────────────────────────────────────
@@ -575,34 +530,37 @@ class PlotterControlGUI:
         main_frame = ttk.Frame(parent)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Left controls panel
+        # Left: scrollable controls (300 px wide)
         ctrl_container = ttk.Frame(main_frame, width=300)
         ctrl_container.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
         ctrl_container.pack_propagate(False)
 
-        ctrl_canvas  = tk.Canvas(ctrl_container, width=280, highlightthickness=0)
-        scrollbar    = ttk.Scrollbar(ctrl_container, orient="vertical",
-                                     command=ctrl_canvas.yview)
-        ctrl_frame   = ttk.Frame(ctrl_canvas)
-
+        ctrl_canvas = tk.Canvas(ctrl_container, width=280, highlightthickness=0)
+        sb = ttk.Scrollbar(ctrl_container, orient="vertical", command=ctrl_canvas.yview)
+        ctrl_frame = ttk.Frame(ctrl_canvas)
         ctrl_frame.bind("<Configure>",
-                        lambda e: ctrl_canvas.configure(
-                            scrollregion=ctrl_canvas.bbox("all")))
+                        lambda e: ctrl_canvas.configure(scrollregion=ctrl_canvas.bbox("all")))
         ctrl_canvas.create_window((0, 0), window=ctrl_frame, anchor="nw")
-        ctrl_canvas.configure(yscrollcommand=scrollbar.set)
+        ctrl_canvas.configure(yscrollcommand=sb.set)
         ctrl_canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        sb.pack(side="right", fill="y")
+        ctrl_canvas.bind_all("<MouseWheel>",
+                             lambda e: ctrl_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
 
-        def _mw(e):
-            ctrl_canvas.yview_scroll(int(-1*(e.delta/120)), "units")
-        ctrl_canvas.bind_all("<MouseWheel>", _mw)
-
-        # Right canvas
+        # Centre: image canvas (expands to fill remaining space)
         canvas_frame = ttk.Frame(main_frame)
         canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        # Right: camera sidebar (fixed 300 px)
+        cam_sidebar = ttk.Frame(main_frame, width=300)
+        cam_sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(10, 0))
+        cam_sidebar.pack_propagate(False)
+
         self._create_controls(ctrl_frame)
         self._create_canvas(canvas_frame)
+        self._create_camera_sidebar(cam_sidebar)
+
+    # ── Left panel controls ───────────────────────────────────────────────────
 
     def _create_controls(self, parent):
         # Image section
@@ -610,8 +568,7 @@ class PlotterControlGUI:
         img_sec.pack(fill=tk.X, pady=(0, 10))
         ttk.Button(img_sec, text="Load Image",
                    command=self._load_image).pack(fill=tk.X, pady=2)
-        self.image_info_label = ttk.Label(img_sec, text="No image loaded",
-                                          wraplength=250)
+        self.image_info_label = ttk.Label(img_sec, text="No image loaded", wraplength=250)
         self.image_info_label.pack(fill=tk.X, pady=2)
 
         # Plotter section
@@ -626,51 +583,44 @@ class PlotterControlGUI:
         # Mode section
         mode_sec = ttk.LabelFrame(parent, text="Mode", padding=10)
         mode_sec.pack(fill=tk.X, pady=(0, 10))
-        ttk.Radiobutton(mode_sec, text="Live Mode",
-                        variable=self.current_mode, value="live",
-                        command=self._on_mode_change).pack(anchor=tk.W)
+        ttk.Radiobutton(mode_sec, text="Live Mode", variable=self.current_mode,
+                        value="live", command=self._on_mode_change).pack(anchor=tk.W)
         ttk.Label(mode_sec, text="  Click → execute immediately",
-                  font=('TkDefaultFont', 9),
-                  foreground='gray').pack(anchor=tk.W, padx=(20, 0))
-        ttk.Radiobutton(mode_sec, text="Sequence Mode",
-                        variable=self.current_mode, value="sequence",
-                        command=self._on_mode_change).pack(anchor=tk.W, pady=(5, 0))
+                  font=('TkDefaultFont', 9), foreground='gray').pack(anchor=tk.W, padx=(20, 0))
+        ttk.Radiobutton(mode_sec, text="Sequence Mode", variable=self.current_mode,
+                        value="sequence", command=self._on_mode_change).pack(anchor=tk.W, pady=(5, 0))
         ttk.Label(mode_sec, text="  Build list → Run all",
-                  font=('TkDefaultFont', 9),
-                  foreground='gray').pack(anchor=tk.W, padx=(20, 0))
+                  font=('TkDefaultFont', 9), foreground='gray').pack(anchor=tk.W, padx=(20, 0))
 
         # Settings section
         set_sec = ttk.LabelFrame(parent, text="Settings", padding=10)
         set_sec.pack(fill=tk.X, pady=(0, 10))
         for label, var in [("Press Distance (mm):", self.press_distance),
-                            ("X Offset (mm):",       self.offset_x),
-                            ("Y Offset (mm):",       self.offset_y)]:
+                            ("X Offset (mm):", self.offset_x),
+                            ("Y Offset (mm):", self.offset_y)]:
             ttk.Label(set_sec, text=label).pack(anchor=tk.W)
-            ttk.Entry(set_sec, textvariable=var, width=10).pack(
-                anchor=tk.W, pady=(0, 5))
+            ttk.Entry(set_sec, textvariable=var, width=10).pack(anchor=tk.W, pady=(0, 5))
 
         # Points section
         pts_sec = ttk.LabelFrame(parent, text="Points", padding=10)
         pts_sec.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         self.points_label = ttk.Label(pts_sec, text="Points: 0")
         self.points_label.pack(anchor=tk.W, pady=(0, 5))
-
         lf = ttk.Frame(pts_sec)
         lf.pack(fill=tk.BOTH, expand=True)
-        sb = ttk.Scrollbar(lf)
-        sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.points_listbox = tk.Listbox(lf, yscrollcommand=sb.set, height=8)
+        psb = ttk.Scrollbar(lf)
+        psb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.points_listbox = tk.Listbox(lf, yscrollcommand=psb.set, height=8)
         self.points_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        sb.config(command=self.points_listbox.yview)
-
+        psb.config(command=self.points_listbox.yview)
         bf = ttk.Frame(pts_sec)
         bf.pack(fill=tk.X, pady=(5, 0))
         ttk.Button(bf, text="Delete Selected",
-                   command=self._delete_selected_point).pack(
-                   side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+                   command=self._delete_selected_point).pack(side=tk.LEFT, fill=tk.X,
+                                                             expand=True, padx=(0, 2))
         ttk.Button(bf, text="Clear All",
-                   command=self._clear_all_points).pack(
-                   side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
+                   command=self._clear_all_points).pack(side=tk.LEFT, fill=tk.X,
+                                                        expand=True, padx=(2, 0))
 
         # End effector setup
         setup_sec = ttk.LabelFrame(parent, text="End Effector Setup", padding=10)
@@ -678,8 +628,7 @@ class PlotterControlGUI:
         ttk.Button(setup_sec, text="Setup Tool",
                    command=self._open_setup_dialog).pack(fill=tk.X)
         ttk.Label(setup_sec, text="Load racks into servo gears",
-                  font=('TkDefaultFont', 9),
-                  foreground='gray').pack(anchor=tk.W)
+                  font=('TkDefaultFont', 9), foreground='gray').pack(anchor=tk.W)
 
         # Manual jog
         jog_sec = ttk.LabelFrame(parent, text="Manual Jog", padding=10)
@@ -687,23 +636,21 @@ class PlotterControlGUI:
         ttk.Button(jog_sec, text="Jog Control",
                    command=self._open_jog_dialog).pack(fill=tk.X)
         ttk.Label(jog_sec, text="Manual axis movement",
-                  font=('TkDefaultFont', 9),
-                  foreground='gray').pack(anchor=tk.W)
+                  font=('TkDefaultFont', 9), foreground='gray').pack(anchor=tk.W)
 
         # Execution section
         exec_sec = ttk.LabelFrame(parent, text="Execution", padding=10)
         exec_sec.pack(fill=tk.X)
         self.run_button = ttk.Button(exec_sec, text="Run Sequence",
-                                     command=self._run_sequence,
-                                     state=tk.DISABLED)
+                                     command=self._run_sequence, state=tk.DISABLED)
         self.run_button.pack(fill=tk.X, pady=(0, 5))
         self.stop_button = ttk.Button(exec_sec, text="Emergency Stop",
-                                      command=self._emergency_stop,
-                                      state=tk.DISABLED)
+                                      command=self._emergency_stop, state=tk.DISABLED)
         self.stop_button.pack(fill=tk.X)
-        self.status_label = ttk.Label(exec_sec, text="Ready",
-                                      foreground="green")
+        self.status_label = ttk.Label(exec_sec, text="Ready", foreground="green")
         self.status_label.pack(fill=tk.X, pady=(5, 0))
+
+    # ── Centre: image canvas ──────────────────────────────────────────────────
 
     def _create_canvas(self, parent):
         cc = ttk.Frame(parent)
@@ -713,53 +660,365 @@ class PlotterControlGUI:
         v_sb = ttk.Scrollbar(cc, orient=tk.VERTICAL)
         v_sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas = tk.Canvas(cc, bg='gray',
-                                xscrollcommand=h_sb.set,
-                                yscrollcommand=v_sb.set)
+                                xscrollcommand=h_sb.set, yscrollcommand=v_sb.set)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         h_sb.config(command=self.canvas.xview)
         v_sb.config(command=self.canvas.yview)
         self.canvas.bind('<Button-1>', self._on_canvas_click)
         self.canvas.create_text(400, 300, text="Load an image to begin",
-                                font=('Arial', 16), fill='white',
-                                tags='instructions')
+                                font=('Arial', 16), fill='white', tags='instructions')
 
-    # ── Tab 2: Button Log ─────────────────────────────────────────────────────
+    # =========================================================================
+    # IP Camera Sidebar
+    # =========================================================================
+
+    def _create_camera_sidebar(self, parent):
+        """Build the right-side IP camera panel."""
+
+        # ── Header ───────────────────────────────────────────────────────────
+        hdr = tk.Frame(parent, bg="#1a1d27", height=32)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="IP CAMERA", bg="#1a1d27", fg="#4f8ef7",
+                 font=("Courier New", 9, "bold")).pack(side=tk.LEFT, padx=8, pady=7)
+        # live indicator dot (animated via _cam_tick)
+        self._cam_dot = tk.Canvas(hdr, width=10, height=10,
+                                  bg="#1a1d27", highlightthickness=0)
+        self._cam_dot.pack(side=tk.RIGHT, padx=8, pady=11)
+        self._cam_dot.create_oval(1, 1, 9, 9, fill="#374151", outline="", tags="dot")
+
+        # ── URL input row ─────────────────────────────────────────────────────
+        url_frame = tk.Frame(parent, bg="#252839")
+        url_frame.pack(fill=tk.X, padx=6, pady=(6, 0))
+
+        tk.Label(url_frame, text="URL", bg="#252839", fg="#6b7280",
+                 font=("Courier New", 8, "bold")).pack(side=tk.LEFT, padx=(6, 4), pady=6)
+
+        url_entry = tk.Entry(url_frame, textvariable=self._cam_url,
+                             bg="#1a1d27", fg="#e8eaf0",
+                             insertbackground="#e8eaf0",
+                             font=("Courier New", 9),
+                             relief=tk.FLAT, bd=0)
+        url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), pady=6)
+        # placeholder hint
+        self._set_placeholder(url_entry, "http://192.168.1.x/video")
+
+        # ── Connect / Disconnect buttons ──────────────────────────────────────
+        btn_row = tk.Frame(parent, bg="#0f1117")
+        btn_row.pack(fill=tk.X, padx=6, pady=4)
+
+        self._cam_connect_btn = tk.Button(
+            btn_row, text="Connect",
+            bg="#4f8ef7", fg="white", activebackground="#3b74e0",
+            font=("Courier New", 9, "bold"), relief=tk.FLAT, cursor="hand2",
+            padx=10, pady=4, command=self._cam_connect)
+        self._cam_connect_btn.pack(side=tk.LEFT, padx=(0, 4))
+
+        self._cam_disconnect_btn = tk.Button(
+            btn_row, text="Disconnect",
+            bg="#374151", fg="#9ca3af", activebackground="#4b5563",
+            font=("Courier New", 9), relief=tk.FLAT, cursor="hand2",
+            padx=10, pady=4, command=self._cam_disconnect,
+            state=tk.DISABLED)
+        self._cam_disconnect_btn.pack(side=tk.LEFT)
+
+        # ── Video frame area ──────────────────────────────────────────────────
+        vid_outer = tk.Frame(parent, bg="#0a0c12",
+                             highlightbackground="#2d3148", highlightthickness=1)
+        vid_outer.pack(fill=tk.X, padx=6, pady=6)
+
+        self._cam_canvas = tk.Canvas(vid_outer,
+                                     width=self.CAM_W, height=self.CAM_H,
+                                     bg="#0a0c12", highlightthickness=0)
+        self._cam_canvas.pack()
+        # placeholder text
+        self._cam_canvas.create_text(
+            self.CAM_W // 2, self.CAM_H // 2,
+            text="No feed", fill="#374151",
+            font=("Courier New", 13), tags="placeholder")
+
+        # ── Status bar ────────────────────────────────────────────────────────
+        status_row = tk.Frame(parent, bg="#0f1117")
+        status_row.pack(fill=tk.X, padx=6)
+
+        tk.Label(status_row, textvariable=self._cam_status,
+                 bg="#0f1117", fg="#6b7280",
+                 font=("Courier New", 8)).pack(side=tk.LEFT)
+        tk.Label(status_row, textvariable=self._cam_fps_display,
+                 bg="#0f1117", fg="#4f8ef7",
+                 font=("Courier New", 8)).pack(side=tk.RIGHT)
+
+        # ── Snapshot button ───────────────────────────────────────────────────
+        snap_frame = ttk.LabelFrame(parent, text="Snapshot", padding=8)
+        snap_frame.pack(fill=tk.X, padx=6, pady=(10, 4))
+
+        ttk.Button(snap_frame, text="Save Frame as PNG",
+                   command=self._cam_snapshot).pack(fill=tk.X)
+        tk.Label(snap_frame, text="Saves current camera frame to disk",
+                 bg=snap_frame.cget("background"),
+                 font=("TkDefaultFont", 8), foreground="gray").pack(anchor=tk.W, pady=(4, 0))
+
+        # ── Tips ──────────────────────────────────────────────────────────────
+        tips = ttk.LabelFrame(parent, text="Supported URL formats", padding=8)
+        tips.pack(fill=tk.X, padx=6, pady=(6, 0))
+        for tip in [
+            "MJPEG stream:  .../video",
+            "Single JPEG:   .../shot.jpg",
+            "With auth:     http://user:pass@ip/",
+        ]:
+            tk.Label(tips, text=tip, font=("Courier New", 7),
+                     foreground="#6b7280",
+                     bg=tips.cget("background"),
+                     anchor="w").pack(fill=tk.X)
+
+    # ── Placeholder helper ────────────────────────────────────────────────────
+
+    def _set_placeholder(self, entry, text):
+        entry.insert(0, text)
+        entry.config(fg="#4b5563")
+
+        def on_focus_in(e):
+            if entry.get() == text:
+                entry.delete(0, tk.END)
+                entry.config(fg="#e8eaf0")
+
+        def on_focus_out(e):
+            if not entry.get():
+                entry.insert(0, text)
+                entry.config(fg="#4b5563")
+
+        entry.bind("<FocusIn>",  on_focus_in)
+        entry.bind("<FocusOut>", on_focus_out)
+
+    # =========================================================================
+    # Camera logic
+    # =========================================================================
+
+    def _cam_connect(self):
+        url = self._cam_url.get().strip()
+        placeholder = "rtsp://admin:password123@10.253.23.73:554/cam/realmonitor?channel=1&subtype=0"
+        if not url or url == placeholder:
+            messagebox.showwarning("Camera", "Please enter an IP camera URL.")
+            return
+        if self._cam_running:
+            self._cam_stop_thread()
+
+        self._cam_running = True
+        self._cam_status.set("Connecting…")
+        self._cam_connect_btn.config(state=tk.DISABLED)
+        self._cam_disconnect_btn.config(state=tk.NORMAL)
+
+        # Determine stream type from URL
+        is_mjpeg = not any(url.lower().endswith(ext)
+                           for ext in ['.jpg', '.jpeg', '.png', '.bmp'])
+
+        if is_mjpeg:
+            self._cam_thread = threading.Thread(
+                target=self._cam_mjpeg_loop, args=(url,), daemon=True)
+        else:
+            self._cam_thread = threading.Thread(
+                target=self._cam_snapshot_loop, args=(url,), daemon=True)
+
+        self._cam_thread.start()
+        self._cam_ui_poll()   # start UI update loop
+
+    def _cam_disconnect(self):
+        self._cam_stop_thread()
+        self._cam_status.set("Disconnected")
+        self._cam_fps_display.set("— fps")
+        self._cam_connect_btn.config(state=tk.NORMAL)
+        self._cam_disconnect_btn.config(state=tk.DISABLED)
+        self._cam_dot.itemconfig("dot", fill="#374151")
+        # clear canvas
+        self._cam_canvas.delete("all")
+        self._cam_canvas.create_text(
+            self.CAM_W // 2, self.CAM_H // 2,
+            text="No feed", fill="#374151",
+            font=("Courier New", 13), tags="placeholder")
+
+    def _cam_stop_thread(self):
+        self._cam_running = False
+        if self._cam_after_id:
+            self.root.after_cancel(self._cam_after_id)
+            self._cam_after_id = None
+        # drain queue
+        while not self._cam_frame_queue.empty():
+            try:
+                self._cam_frame_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    # ── Background thread: MJPEG stream ──────────────────────────────────────
+
+    def _cam_mjpeg_loop(self, url: str):
+        """
+        Read an MJPEG stream by scanning for JPEG boundaries in the byte stream.
+        Works with most IP cameras that serve multipart/x-mixed-replace.
+        """
+        BOUNDARY_MARKER = b'\xff\xd8'   # JPEG SOI
+        END_MARKER      = b'\xff\xd9'   # JPEG EOI
+
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "PlotterCam/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as stream:
+                buf = b""
+                while self._cam_running:
+                    chunk = stream.read(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    # find a complete JPEG
+                    start = buf.find(BOUNDARY_MARKER)
+                    if start == -1:
+                        buf = buf[-4:]   # keep tail in case boundary split
+                        continue
+                    end = buf.find(END_MARKER, start + 2)
+                    if end == -1:
+                        continue
+                    jpeg_bytes = buf[start: end + 2]
+                    buf = buf[end + 2:]
+                    self._cam_push_frame(jpeg_bytes)
+        except Exception as exc:
+            if self._cam_running:
+                self._cam_status.set(f"Error: {exc}")
+                self._cam_running = False
+
+    # ── Background thread: static JPEG polling ────────────────────────────────
+
+    def _cam_snapshot_loop(self, url: str):
+        """Poll a static JPEG URL at CAM_FPS_TARGET fps."""
+        interval = 1.0 / self.CAM_FPS_TARGET
+        while self._cam_running:
+            t0 = time.time()
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "PlotterCam/1.0"})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = resp.read()
+                self._cam_push_frame(data)
+            except Exception as exc:
+                if self._cam_running:
+                    self._cam_status.set(f"Error: {exc}")
+            elapsed = time.time() - t0
+            time.sleep(max(0, interval - elapsed))
+
+    # ── Push a raw JPEG bytes → queue ─────────────────────────────────────────
+
+    def _cam_push_frame(self, jpeg_bytes: bytes):
+        try:
+            img = Image.open(io.BytesIO(jpeg_bytes))
+            # Fit inside CAM_W × CAM_H keeping aspect ratio
+            img.thumbnail((self.CAM_W, self.CAM_H), Image.Resampling.LANCZOS)
+            # Discard oldest if queue full
+            if self._cam_frame_queue.full():
+                try:
+                    self._cam_frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self._cam_frame_queue.put_nowait(img)
+        except Exception:
+            pass   # bad frame – skip silently
+
+    # ── UI poll: drain queue → update canvas (runs on main thread) ────────────
+
+    def _cam_ui_poll(self):
+        updated = False
+        while not self._cam_frame_queue.empty():
+            try:
+                img = self._cam_frame_queue.get_nowait()
+            except queue.Empty:
+                break
+            photo = ImageTk.PhotoImage(img)
+            self._cam_photo = photo   # prevent GC
+            iw, ih = img.size
+            x = (self.CAM_W - iw) // 2
+            y = (self.CAM_H - ih) // 2
+            self._cam_canvas.delete("all")
+            self._cam_canvas.create_image(x, y, anchor=tk.NW, image=photo)
+            updated = True
+            self._cam_fps_counter += 1
+
+        if updated:
+            self._cam_status.set("Live")
+            self._cam_dot.itemconfig("dot", fill="#22c55e")
+        elif self._cam_running:
+            # if no frame for a while show waiting indicator
+            pass
+
+        # Update FPS counter every second
+        now = time.time()
+        if now - self._cam_fps_ts >= 1.0:
+            fps = self._cam_fps_counter / (now - self._cam_fps_ts)
+            self._cam_fps_display.set(f"{fps:.1f} fps")
+            self._cam_fps_counter = 0
+            self._cam_fps_ts = now
+
+        # Check if thread died unexpectedly
+        if not self._cam_running and self._cam_thread and not self._cam_thread.is_alive():
+            self._cam_dot.itemconfig("dot", fill="#ef4444")
+            self._cam_connect_btn.config(state=tk.NORMAL)
+            self._cam_disconnect_btn.config(state=tk.DISABLED)
+            return
+
+        if self._cam_running:
+            self._cam_after_id = self.root.after(33, self._cam_ui_poll)  # ~30 fps UI refresh
+
+    # ── Snapshot ──────────────────────────────────────────────────────────────
+
+    def _cam_snapshot(self):
+        """Save the current camera frame to a PNG file chosen by the user."""
+        if self._cam_frame_queue.empty() and self._cam_photo is None:
+            messagebox.showinfo("Snapshot", "No camera frame available yet.")
+            return
+        filepath = filedialog.asksaveasfilename(
+            title="Save Camera Frame",
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png"), ("JPEG image", "*.jpg")],
+            initialfile=f"cam_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png",
+        )
+        if not filepath:
+            return
+        try:
+            # Grab whatever is displayed on the cam canvas as a screenshot
+            # Re-render from the last PIL image stored via _cam_push_frame
+            # We'll re-request a single frame from the URL for a clean save
+            url = self._cam_url.get().strip()
+            req = urllib.request.Request(url, headers={"User-Agent": "PlotterCam/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = resp.read()
+            img = Image.open(io.BytesIO(data))
+            img.save(filepath)
+            messagebox.showinfo("Snapshot", f"Frame saved to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Snapshot Error", str(e))
+
+    # =========================================================================
+    # Tab 2: Button Log
+    # =========================================================================
 
     def _build_log_tab(self, parent):
         top = ttk.Frame(parent)
         top.pack(fill=tk.X, padx=10, pady=(10, 4))
-
         ttk.Label(top, text="Button Press History",
                   font=('TkDefaultFont', 11, 'bold')).pack(side=tk.LEFT)
-
         ttk.Button(top, text="⟳  Refresh",
                    command=self._refresh_log).pack(side=tk.RIGHT)
 
-        # Filter by user
         filter_frame = ttk.Frame(parent)
         filter_frame.pack(fill=tk.X, padx=10, pady=(0, 6))
         ttk.Label(filter_frame, text="Filter user:").pack(side=tk.LEFT)
         self._log_filter = tk.StringVar(value="all")
-        filter_combo = ttk.Combobox(filter_frame,
-                                    textvariable=self._log_filter,
-                                    values=["all", "admin", "operator"],
-                                    width=12, state="readonly")
-        filter_combo.pack(side=tk.LEFT, padx=6)
-        filter_combo.bind("<<ComboboxSelected>>", lambda _: self._refresh_log())
+        fc = ttk.Combobox(filter_frame, textvariable=self._log_filter,
+                          values=["all", "admin", "operator"],
+                          width=12, state="readonly")
+        fc.pack(side=tk.LEFT, padx=6)
+        fc.bind("<<ComboboxSelected>>", lambda _: self._refresh_log())
 
-        # Treeview
         cols = ("id", "pressed_at", "username", "x_mm", "y_mm",
                 "servo", "press_dist", "status", "note")
         col_labels = {
-            "id":          "#",
-            "pressed_at":  "Timestamp",
-            "username":    "User",
-            "x_mm":        "X (mm)",
-            "y_mm":        "Y (mm)",
-            "servo":       "Servo",
-            "press_dist":  "Press dist",
-            "status":      "Status",
-            "note":        "Note",
+            "id": "#", "pressed_at": "Timestamp", "username": "User",
+            "x_mm": "X (mm)", "y_mm": "Y (mm)", "servo": "Servo",
+            "press_dist": "Press dist", "status": "Status", "note": "Note",
         }
         col_widths = {
             "id": 40, "pressed_at": 160, "username": 80,
@@ -769,108 +1028,73 @@ class PlotterControlGUI:
 
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
-
-        tree_sb_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
-        tree_sb_y.pack(side=tk.RIGHT, fill=tk.Y)
-        tree_sb_x = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL)
-        tree_sb_x.pack(side=tk.BOTTOM, fill=tk.X)
-
-        self.log_tree = ttk.Treeview(tree_frame, columns=cols,
-                                     show="headings",
-                                     yscrollcommand=tree_sb_y.set,
-                                     xscrollcommand=tree_sb_x.set)
+        tsb_y = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
+        tsb_y.pack(side=tk.RIGHT, fill=tk.Y)
+        tsb_x = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL)
+        tsb_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.log_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                                     yscrollcommand=tsb_y.set, xscrollcommand=tsb_x.set)
         for c in cols:
             self.log_tree.heading(c, text=col_labels[c])
             self.log_tree.column(c, width=col_widths[c], anchor=tk.CENTER)
         self.log_tree.pack(fill=tk.BOTH, expand=True)
-        tree_sb_y.config(command=self.log_tree.yview)
-        tree_sb_x.config(command=self.log_tree.xview)
-
-        # Row colouring: success=green tint, error=red tint
+        tsb_y.config(command=self.log_tree.yview)
+        tsb_x.config(command=self.log_tree.xview)
         self.log_tree.tag_configure("success", background="#f0fdf4")
         self.log_tree.tag_configure("error",   background="#fef2f2")
         self.log_tree.tag_configure("mine",    font=('TkDefaultFont', 9, 'bold'))
 
-        # Summary bar
         self.log_summary = ttk.Label(parent, text="", foreground="gray")
         self.log_summary.pack(padx=10, pady=(0, 6), anchor=tk.W)
 
     def _refresh_log(self):
         for row in self.log_tree.get_children():
             self.log_tree.delete(row)
-
-        filter_user = self._log_filter.get()
-        if filter_user == "all":
-            entries = db.get_log(limit=300)
-        else:
-            entries = db.get_log_for_user(filter_user, limit=300)
-
+        fu = self._log_filter.get()
+        entries = db.get_log(300) if fu == "all" else db.get_log_for_user(fu, 300)
         for e in entries:
             tags = [e["status"]]
             if e["username"] == self.current_user["username"]:
                 tags.append("mine")
-
-            # Format None values nicely
-            servo_txt = str(e["servo_used"]) if e["servo_used"] else "—"
-            dist_txt  = f'{e["press_dist"]:.1f}' if e["press_dist"] else "—"
-            note_txt  = e["note"] or ""
-
-            self.log_tree.insert(
-                "", tk.END,
-                values=(
-                    e["id"],
-                    e["pressed_at"],
-                    e["username"],
-                    f'{e["target_x_mm"]:.2f}',
-                    f'{e["target_y_mm"]:.2f}',
-                    servo_txt,
-                    dist_txt,
-                    e["status"],
-                    note_txt,
-                ),
-                tags=tuple(tags),
-            )
-
-        total   = len(entries)
+            self.log_tree.insert("", tk.END, values=(
+                e["id"], e["pressed_at"], e["username"],
+                f'{e["target_x_mm"]:.2f}', f'{e["target_y_mm"]:.2f}',
+                str(e["servo_used"]) if e["servo_used"] else "—",
+                f'{e["press_dist"]:.1f}' if e["press_dist"] else "—",
+                e["status"], e["note"] or "",
+            ), tags=tuple(tags))
         success = sum(1 for e in entries if e["status"] == "success")
-        errors  = total - success
         self.log_summary.config(
-            text=f"Showing {total} entries  ·  "
-                 f"{success} success  ·  {errors} error"
-        )
+            text=f"Showing {len(entries)} entries  ·  {success} success  ·  {len(entries)-success} error")
 
     def _on_tab_change(self, _event):
         if self.notebook.index("current") == 1:
             self._refresh_log()
 
-    # ── Image loading ─────────────────────────────────────────────────────────
+    # =========================================================================
+    # Image loading
+    # =========================================================================
 
     def _load_image(self):
         filepath = filedialog.askopenfilename(
             title="Select Image",
             filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif *.tiff"),
-                       ("All files", "*.*")]
-        )
+                       ("All files", "*.*")])
         if not filepath:
             return
-
         dialog = tk.Toplevel(self.root)
         dialog.title("Image Dimensions")
         dialog.geometry("300x150")
         dialog.transient(self.root)
         dialog.grab_set()
-
         ttk.Label(dialog, text="Enter real-world dimensions:").pack(pady=10)
-        for label, var_default in [("Width (mm):", 200.0), ("Height (mm):", 150.0)]:
+        width_var  = tk.DoubleVar(value=200.0)
+        height_var = tk.DoubleVar(value=150.0)
+        for label, var in [("Width (mm):", width_var), ("Height (mm):", height_var)]:
             f = ttk.Frame(dialog)
             f.pack(pady=5)
             ttk.Label(f, text=label).pack(side=tk.LEFT)
-            v = tk.DoubleVar(value=var_default)
-            ttk.Entry(f, textvariable=v, width=10).pack(side=tk.LEFT)
-            if "Width" in label:
-                width_var = v
-            else:
-                height_var = v
+            ttk.Entry(f, textvariable=var, width=10).pack(side=tk.LEFT)
 
         def on_ok():
             self.real_width_mm  = width_var.get()
@@ -885,9 +1109,8 @@ class PlotterControlGUI:
     def _display_image(self):
         try:
             self.image = Image.open(self.image_path)
-            max_w, max_h = 800, 600
             iw, ih = self.image.size
-            self.scale_factor = min(max_w/iw, max_h/ih, 1.0)
+            self.scale_factor = min(800/iw, 600/ih, 1.0)
             dw = int(iw * self.scale_factor)
             dh = int(ih * self.scale_factor)
             disp = self.image.resize((dw, dh), Image.Resampling.LANCZOS)
@@ -896,13 +1119,14 @@ class PlotterControlGUI:
             self.canvas.create_image(0, 0, anchor=tk.NW, image=self.image_tk)
             self.canvas.config(scrollregion=(0, 0, dw, dh))
             self.image_info_label.config(
-                text=f"Image: {dw}×{dh}px\nReal: "
-                     f"{self.real_width_mm}×{self.real_height_mm}mm")
+                text=f"Image: {dw}×{dh}px\nReal: {self.real_width_mm}×{self.real_height_mm}mm")
             self._clear_all_points()
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load image: {e}")
 
-    # ── Plotter init ──────────────────────────────────────────────────────────
+    # =========================================================================
+    # Plotter init
+    # =========================================================================
 
     def _initialize_plotter(self):
         if self.plotter_initialized:
@@ -912,8 +1136,7 @@ class PlotterControlGUI:
         def init_thread():
             try:
                 self._update_status("Initializing plotter…", "orange")
-                self.plotter_status_label.config(text="Initializing…",
-                                                 foreground="orange")
+                self.plotter_status_label.config(text="Initializing…", foreground="orange")
                 if self.plotter is None:
                     self.plotter = XYPlotter(**self.plotter_config)
                 self._update_status("Homing and calibrating…", "orange")
@@ -922,58 +1145,51 @@ class PlotterControlGUI:
                 self.is_homed = True
                 self._update_status("Plotter ready", "green")
                 self.plotter_status_label.config(
-                    text=f"Ready ({max_x:.1f}×{max_y:.1f}mm)",
-                    foreground="green")
+                    text=f"Ready ({max_x:.1f}×{max_y:.1f}mm)", foreground="green")
                 self.stop_button.config(state=tk.NORMAL)
                 if self.current_mode.get() == "sequence":
                     self.run_button.config(state=tk.NORMAL)
             except Exception as e:
                 self._update_status(f"Error: {e}", "red")
-                self.plotter_status_label.config(text=f"Error: {e}",
-                                                 foreground="red")
+                self.plotter_status_label.config(text=f"Error: {e}", foreground="red")
                 messagebox.showerror("Initialization Error", str(e))
 
         threading.Thread(target=init_thread, daemon=True).start()
 
-    # ── Canvas click ──────────────────────────────────────────────────────────
+    # =========================================================================
+    # Canvas click & point management
+    # =========================================================================
 
     def _on_canvas_click(self, event):
         if self.image is None:
             messagebox.showwarning("No Image", "Please load an image first")
             return
         if not self.plotter_initialized:
-            messagebox.showwarning("Plotter Not Ready",
-                                   "Please initialize plotter first")
+            messagebox.showwarning("Plotter Not Ready", "Please initialize plotter first")
             return
         if self.is_executing:
             return
-
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
-        pixel_x  = canvas_x / self.scale_factor
-        pixel_y  = canvas_y / self.scale_factor
-        mm_x = (pixel_x / self.image.width)  * self.real_width_mm  + self.offset_x.get()
-        mm_y = self.real_height_mm - (pixel_y / self.image.height) * self.real_height_mm \
+        mm_x = (canvas_x / self.scale_factor / self.image.width) * self.real_width_mm \
+               + self.offset_x.get()
+        mm_y = self.real_height_mm \
+               - (canvas_y / self.scale_factor / self.image.height) * self.real_height_mm \
                + self.offset_y.get()
-
         self._add_point(mm_x, mm_y, canvas_x, canvas_y)
         if self.current_mode.get() == "live":
             self._execute_live_point(len(self.points) - 1)
 
     def _add_point(self, mm_x, mm_y, canvas_x, canvas_y):
         self.points.append((mm_x, mm_y))
-        self.points_listbox.insert(
-            tk.END, f"{len(self.points)}: ({mm_x:.1f}, {mm_y:.1f})")
+        self.points_listbox.insert(tk.END, f"{len(self.points)}: ({mm_x:.1f}, {mm_y:.1f})")
         color = "yellow" if self.current_mode.get() == "sequence" else "cyan"
         marker = self.canvas.create_oval(
             canvas_x-5, canvas_y-5, canvas_x+5, canvas_y+5,
-            fill=color, outline="black", width=2,
-            tags=f'point_{len(self.points)-1}')
+            fill=color, outline="black", width=2, tags=f'point_{len(self.points)-1}')
         self.point_markers.append(marker)
-        self.canvas.create_text(canvas_x, canvas_y-15,
-                                text=str(len(self.points)),
-                                fill="white",
-                                font=('Arial', 10, 'bold'),
+        self.canvas.create_text(canvas_x, canvas_y-15, text=str(len(self.points)),
+                                fill="white", font=('Arial', 10, 'bold'),
                                 tags=f'point_{len(self.points)-1}')
         self.points_label.config(text=f"Points: {len(self.points)}")
 
@@ -1022,37 +1238,27 @@ class PlotterControlGUI:
                                     tags=f'point_{i}')
         self.points_label.config(text=f"Points: {len(self.points)}")
 
-    # ── Execution (with DB logging) ───────────────────────────────────────────
+    # =========================================================================
+    # Execution (with DB logging)
+    # =========================================================================
 
     def _do_press_and_log(self, mm_x: float, mm_y: float) -> int:
-        """
-        Execute move_and_press and write a row to the database.
-        Returns servo_used.  Raises on failure (also logs the error).
-        """
         press_dist = self.press_distance.get()
         try:
             servo_used = self.plotter.move_and_press(
                 mm_x, mm_y, press_distance_mm=press_dist)
             db.log_button_press(
-                user_id    = self.current_user["id"],
-                username   = self.current_user["username"],
-                target_x_mm = mm_x,
-                target_y_mm = mm_y,
-                servo_used  = servo_used,
-                press_dist  = press_dist,
-                status      = "success",
-            )
+                user_id=self.current_user["id"],
+                username=self.current_user["username"],
+                target_x_mm=mm_x, target_y_mm=mm_y,
+                servo_used=servo_used, press_dist=press_dist, status="success")
             return servo_used
         except Exception as exc:
             db.log_button_press(
-                user_id    = self.current_user["id"],
-                username   = self.current_user["username"],
-                target_x_mm = mm_x,
-                target_y_mm = mm_y,
-                press_dist  = press_dist,
-                status      = "error",
-                note        = str(exc),
-            )
+                user_id=self.current_user["id"],
+                username=self.current_user["username"],
+                target_x_mm=mm_x, target_y_mm=mm_y,
+                press_dist=press_dist, status="error", note=str(exc))
             raise
 
     def _execute_live_point(self, index: int):
@@ -1062,11 +1268,9 @@ class PlotterControlGUI:
                 self.current_executing_index = index
                 mm_x, mm_y = self.points[index]
                 self.canvas.itemconfig(f'point_{index}', fill='red')
-                self._update_status(
-                    f"Moving to ({mm_x:.1f}, {mm_y:.1f})…", "orange")
+                self._update_status(f"Moving to ({mm_x:.1f}, {mm_y:.1f})…", "orange")
                 servo_used = self._do_press_and_log(mm_x, mm_y)
-                self._update_status(
-                    f"Done — servo {servo_used}  ·  logged ✓", "green")
+                self._update_status(f"Done — servo {servo_used}  ·  logged ✓", "green")
                 self.canvas.delete(f'point_{index}')
                 self.points_listbox.delete(index)
                 self.points.pop(index)
@@ -1098,8 +1302,7 @@ class PlotterControlGUI:
                     self.points_listbox.selection_set(i)
                     self.points_listbox.see(i)
                     self._update_status(
-                        f"Point {i+1}/{len(self.points)}: "
-                        f"({mm_x:.1f}, {mm_y:.1f})", "orange")
+                        f"Point {i+1}/{len(self.points)}: ({mm_x:.1f}, {mm_y:.1f})", "orange")
                     servo_used = self._do_press_and_log(mm_x, mm_y)
                     self.canvas.itemconfig(f'point_{i}', fill='green')
                     time.sleep(0.2)
@@ -1131,12 +1334,13 @@ class PlotterControlGUI:
         self.status_label.config(text=message, foreground=color)
         self.root.update_idletasks()
 
-    # ── Jog dialog (unchanged from original) ─────────────────────────────────
+    # =========================================================================
+    # Jog dialog
+    # =========================================================================
 
     def _open_jog_dialog(self):
         if not self.plotter_initialized:
-            messagebox.showwarning("Plotter Not Ready",
-                                   "Please initialize plotter first")
+            messagebox.showwarning("Plotter Not Ready", "Please initialize plotter first")
             return
         dialog = tk.Toplevel(self.root)
         dialog.title("Manual Jog Control")
@@ -1212,42 +1416,34 @@ class PlotterControlGUI:
         ttk.Button(gf, text="Go",
                    command=lambda: [self.plotter.move_to(gx.get(), gy.get()),
                                     update()]).pack(side=tk.LEFT, padx=5)
-
         update()
         ttk.Button(dialog, text="Refresh", command=update).pack(pady=4)
         ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=6)
 
-    # ── Setup dialog (unchanged from original) ────────────────────────────────
+    # =========================================================================
+    # Setup dialog
+    # =========================================================================
 
     def _open_setup_dialog(self):
         if not self.plotter_initialized:
-            messagebox.showwarning("Plotter Not Ready",
-                                   "Please initialize plotter first")
+            messagebox.showwarning("Plotter Not Ready", "Please initialize plotter first")
             return
         dialog = tk.Toplevel(self.root)
         dialog.title("End Effector Setup")
         dialog.geometry("400x500")
         dialog.transient(self.root)
-
         ttk.Label(dialog,
                   text="Load racks into servo gears:\n"
-                       "1. Select servo\n"
-                       "2. Push Forward (max extension)\n"
-                       "3. Back Up until rack engages",
+                       "1. Select servo\n2. Push Forward\n3. Back Up until rack engages",
                   justify=tk.LEFT, padding=10).pack(fill=tk.X)
-
         servo_frame = ttk.LabelFrame(dialog, text="Select Servo", padding=10)
         servo_frame.pack(fill=tk.X, padx=10, pady=5)
         sel_servo = tk.IntVar(value=1)
-        ttk.Radiobutton(servo_frame, text="Servo 1",
-                        variable=sel_servo, value=1).pack(anchor=tk.W)
-        ttk.Radiobutton(servo_frame, text="Servo 2",
-                        variable=sel_servo, value=2).pack(anchor=tk.W)
-
+        ttk.Radiobutton(servo_frame, text="Servo 1", variable=sel_servo, value=1).pack(anchor=tk.W)
+        ttk.Radiobutton(servo_frame, text="Servo 2", variable=sel_servo, value=2).pack(anchor=tk.W)
         angle_frame = ttk.LabelFrame(dialog, text="Current Angle", padding=10)
         angle_frame.pack(fill=tk.X, padx=10, pady=5)
-        angle_lbl = ttk.Label(angle_frame, text="90.0°",
-                              font=('TkDefaultFont', 12, 'bold'))
+        angle_lbl = ttk.Label(angle_frame, text="90.0°", font=('TkDefaultFont', 12, 'bold'))
         angle_lbl.pack()
 
         def upd():
@@ -1271,33 +1467,33 @@ class PlotterControlGUI:
         push.pack(fill=tk.X, padx=10, pady=5)
         ttk.Button(push, text="▶ Push Forward (Max)",
                    command=lambda: set_ang(sel_servo.get(), 180)).pack(fill=tk.X)
-
         back = ttk.LabelFrame(dialog, text="Step 2: Back Up", padding=10)
         back.pack(fill=tk.X, padx=10, pady=5)
         bf = ttk.Frame(back)
         bf.pack(fill=tk.X)
-        ttk.Button(bf, text="◀◀ –10°",  command=lambda: change(-10)).pack(
+        ttk.Button(bf, text="◀◀ –10°", command=lambda: change(-10)).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        ttk.Button(bf, text="◀ –1°",    command=lambda: change(-1)).pack(
+        ttk.Button(bf, text="◀ –1°",   command=lambda: change(-1)).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-        ttk.Button(bf, text="+1° ▶",    command=lambda: change(1)).pack(
+        ttk.Button(bf, text="+1° ▶",   command=lambda: change(1)).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-
         rst = ttk.LabelFrame(dialog, text="Reset", padding=10)
         rst.pack(fill=tk.X, padx=10, pady=5)
         ttk.Button(rst, text="Reset to Neutral (90°)",
                    command=lambda: set_ang(sel_servo.get(), 90)).pack(fill=tk.X)
-
         sel_servo.trace_add('write', lambda *_: upd())
         upd()
         ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=10)
 
-    # ── run / cleanup ─────────────────────────────────────────────────────────
+    # =========================================================================
+    # Run / cleanup
+    # =========================================================================
 
     def run(self):
         self.root.mainloop()
 
     def cleanup(self):
+        self._cam_stop_thread()
         if self.plotter:
             self.plotter.cleanup()
 
@@ -1307,39 +1503,34 @@ class PlotterControlGUI:
 # ============================================================================
 
 def main():
-    # 1. Initialise database (creates file + seeds users if new)
     db.init_db()
 
-    # 2. Show login screen
     login = LoginWindow()
     user  = login.run()
-
     if user is None:
         print("Login cancelled – exiting.")
         return
 
     print(f"[auth] Logged in as: {user['username']} ({user['display_name']})")
 
-    # 3. Plotter hardware config
     config = {
-        'i2c_bus':              1,
-        'x_tic_address':        14,
-        'y_tic_address':        15,
-        'x_pulley_radius_mm':   12.58,
-        'y_pulley_radius_mm':   12.58,
+        'i2c_bus':               1,
+        'x_tic_address':         14,
+        'y_tic_address':         15,
+        'x_pulley_radius_mm':    12.58,
+        'y_pulley_radius_mm':    12.58,
         'x_tics_per_revolution': 200,
         'y_tics_per_revolution': 200,
         'servo1_pin':            18,
         'servo2_pin':            19,
         'servo_gear_radius_mm':  5.0,
-        'servo1_offset_x_mm':  -20.0,
+        'servo1_offset_x_mm':   -20.0,
         'servo1_offset_y_mm':    0.0,
-        'servo2_offset_x_mm':   35.0,
+        'servo2_offset_x_mm':    35.0,
         'servo2_offset_y_mm':    0.0,
         'servo2_reversed':       True,
     }
 
-    # 4. Launch main GUI
     app = PlotterControlGUI(config, current_user=user)
     try:
         app.run()
