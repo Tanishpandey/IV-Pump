@@ -755,7 +755,6 @@ class PlotterControlGUI:
         ttk.Button(snap_frame, text="Save Frame as PNG",
                    command=self._cam_snapshot).pack(fill=tk.X)
         tk.Label(snap_frame, text="Saves current camera frame to disk",
-                 bg=snap_frame.cget("background"),
                  font=("TkDefaultFont", 8), foreground="gray").pack(anchor=tk.W, pady=(4, 0))
 
         # ── Tips ──────────────────────────────────────────────────────────────
