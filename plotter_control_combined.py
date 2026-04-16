@@ -843,23 +843,43 @@ class PlotterControlGUI:
             except queue.Empty:
                 pass
         self._cam_frame_queue.put_nowait(img)
+        
+    def _cam_on_connect_failed(self):
+    """Called on main thread when camera connection fails."""
+        self._cam_dot.itemconfig("dot", fill="#ef4444")
+        self._cam_connect_btn.config(state=tk.NORMAL)
+        self._cam_disconnect_btn.config(state=tk.DISABLED)
 
     def _cam_rtsp_loop(self, url: str):
-        cap = cv2.VideoCapture(url)
-        if not cap.isOpened():
-            self._cam_status.set("Error: could not open stream")
+        cap = cv2.VideoCapture()
+        
+        # Set open timeout to 8 seconds instead of the default 30s
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+        
+        opened = cap.open(url)
+        
+        if not opened or not cap.isOpened():
+            self._cam_status.set("Error: could not connect")
             self._cam_running = False
+            # Re-enable buttons from the main thread
+            self.root.after(0, self._cam_on_connect_failed)
             return
+        
+        self._cam_status.set("Connected — waiting for frames…")
+        
         while self._cam_running:
             ret, frame = cap.read()
             if not ret:
                 if self._cam_running:
                     self._cam_status.set("Error: stream lost")
                     self._cam_running = False
+                    self.root.after(0, self._cam_on_connect_failed)
                 break
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(frame_rgb)
             self._cam_push_frame_pil(img)
+        
         cap.release()
 
     # ── UI poll: drain queue → update canvas (runs on main thread) ────────────
