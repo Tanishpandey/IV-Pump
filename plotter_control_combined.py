@@ -15,10 +15,9 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 from typing import Tuple, Optional
 from datetime import datetime
-import urllib.request
-import io
-import queue
 
+import queue
+import cv2  
 import db
 
 try:
@@ -794,9 +793,8 @@ class PlotterControlGUI:
 
     def _cam_connect(self):
         url = self._cam_url.get().strip()
-        placeholder = "rtsp://admin:password123@10.253.23.73:554/cam/realmonitor?channel=1&subtype=0"
-        if not url or url == placeholder:
-            messagebox.showwarning("Camera", "Please enter an IP camera URL.")
+        if not url or url == "http://192.168.1.x/video":
+            messagebox.showwarning("Camera", "Please enter an RTSP camera URL.")
             return
         if self._cam_running:
             self._cam_stop_thread()
@@ -806,19 +804,10 @@ class PlotterControlGUI:
         self._cam_connect_btn.config(state=tk.DISABLED)
         self._cam_disconnect_btn.config(state=tk.NORMAL)
 
-        # Determine stream type from URL
-        is_mjpeg = not any(url.lower().endswith(ext)
-                           for ext in ['.jpg', '.jpeg', '.png', '.bmp'])
-
-        if is_mjpeg:
-            self._cam_thread = threading.Thread(
-                target=self._cam_mjpeg_loop, args=(url,), daemon=True)
-        else:
-            self._cam_thread = threading.Thread(
-                target=self._cam_snapshot_loop, args=(url,), daemon=True)
-
+        self._cam_thread = threading.Thread(
+            target=self._cam_rtsp_loop, args=(url,), daemon=True)
         self._cam_thread.start()
-        self._cam_ui_poll()   # start UI update loop
+        self._cam_ui_poll()
 
     def _cam_disconnect(self):
         self._cam_stop_thread()
@@ -846,75 +835,32 @@ class PlotterControlGUI:
             except queue.Empty:
                 break
 
-    # ── Background thread: MJPEG stream ──────────────────────────────────────
-
-    def _cam_mjpeg_loop(self, url: str):
-        """
-        Read an MJPEG stream by scanning for JPEG boundaries in the byte stream.
-        Works with most IP cameras that serve multipart/x-mixed-replace.
-        """
-        BOUNDARY_MARKER = b'\xff\xd8'   # JPEG SOI
-        END_MARKER      = b'\xff\xd9'   # JPEG EOI
-
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "PlotterCam/1.0"})
-            with urllib.request.urlopen(req, timeout=10) as stream:
-                buf = b""
-                while self._cam_running:
-                    chunk = stream.read(4096)
-                    if not chunk:
-                        break
-                    buf += chunk
-                    # find a complete JPEG
-                    start = buf.find(BOUNDARY_MARKER)
-                    if start == -1:
-                        buf = buf[-4:]   # keep tail in case boundary split
-                        continue
-                    end = buf.find(END_MARKER, start + 2)
-                    if end == -1:
-                        continue
-                    jpeg_bytes = buf[start: end + 2]
-                    buf = buf[end + 2:]
-                    self._cam_push_frame(jpeg_bytes)
-        except Exception as exc:
-            if self._cam_running:
-                self._cam_status.set(f"Error: {exc}")
-                self._cam_running = False
-
-    # ── Background thread: static JPEG polling ────────────────────────────────
-
-    def _cam_snapshot_loop(self, url: str):
-        """Poll a static JPEG URL at CAM_FPS_TARGET fps."""
-        interval = 1.0 / self.CAM_FPS_TARGET
-        while self._cam_running:
-            t0 = time.time()
+    def _cam_push_frame_pil(self, img: Image.Image):
+        img.thumbnail((self.CAM_W, self.CAM_H), Image.Resampling.LANCZOS)
+        if self._cam_frame_queue.full():
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": "PlotterCam/1.0"})
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    data = resp.read()
-                self._cam_push_frame(data)
-            except Exception as exc:
+                self._cam_frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+        self._cam_frame_queue.put_nowait(img)
+
+    def _cam_rtsp_loop(self, url: str):
+        cap = cv2.VideoCapture(url)
+        if not cap.isOpened():
+            self._cam_status.set("Error: could not open stream")
+            self._cam_running = False
+            return
+        while self._cam_running:
+            ret, frame = cap.read()
+            if not ret:
                 if self._cam_running:
-                    self._cam_status.set(f"Error: {exc}")
-            elapsed = time.time() - t0
-            time.sleep(max(0, interval - elapsed))
-
-    # ── Push a raw JPEG bytes → queue ─────────────────────────────────────────
-
-    def _cam_push_frame(self, jpeg_bytes: bytes):
-        try:
-            img = Image.open(io.BytesIO(jpeg_bytes))
-            # Fit inside CAM_W × CAM_H keeping aspect ratio
-            img.thumbnail((self.CAM_W, self.CAM_H), Image.Resampling.LANCZOS)
-            # Discard oldest if queue full
-            if self._cam_frame_queue.full():
-                try:
-                    self._cam_frame_queue.get_nowait()
-                except queue.Empty:
-                    pass
-            self._cam_frame_queue.put_nowait(img)
-        except Exception:
-            pass   # bad frame – skip silently
+                    self._cam_status.set("Error: stream lost")
+                    self._cam_running = False
+                break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            self._cam_push_frame_pil(img)
+        cap.release()
 
     # ── UI poll: drain queue → update canvas (runs on main thread) ────────────
 
@@ -963,8 +909,7 @@ class PlotterControlGUI:
     # ── Snapshot ──────────────────────────────────────────────────────────────
 
     def _cam_snapshot(self):
-        """Save the current camera frame to a PNG file chosen by the user."""
-        if self._cam_frame_queue.empty() and self._cam_photo is None:
+        if self._cam_photo is None:
             messagebox.showinfo("Snapshot", "No camera frame available yet.")
             return
         filepath = filedialog.asksaveasfilename(
@@ -976,14 +921,13 @@ class PlotterControlGUI:
         if not filepath:
             return
         try:
-            # Grab whatever is displayed on the cam canvas as a screenshot
-            # Re-render from the last PIL image stored via _cam_push_frame
-            # We'll re-request a single frame from the URL for a clean save
             url = self._cam_url.get().strip()
-            req = urllib.request.Request(url, headers={"User-Agent": "PlotterCam/1.0"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = resp.read()
-            img = Image.open(io.BytesIO(data))
+            cap = cv2.VideoCapture(url)
+            ret, frame = cap.read()
+            cap.release()
+            if not ret:
+                raise RuntimeError("Could not grab frame from stream")
+            img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             img.save(filepath)
             messagebox.showinfo("Snapshot", f"Frame saved to:\n{filepath}")
         except Exception as e:
