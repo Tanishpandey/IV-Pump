@@ -767,7 +767,6 @@ class PlotterControlGUI:
         ]:
             tk.Label(tips, text=tip, font=("Courier New", 7),
                      foreground="#6b7280",
-                     bg=tips.cget("background"),
                      anchor="w").pack(fill=tk.X)
 
     # ── Placeholder helper ────────────────────────────────────────────────────
