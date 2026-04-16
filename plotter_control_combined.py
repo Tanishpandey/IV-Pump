@@ -485,6 +485,7 @@ class PlotterControlGUI:
         self._cam_thread      = None
         self._cam_frame_queue = queue.Queue(maxsize=2)
         self._cam_photo       = None   # keep PhotoImage ref alive
+        self._cam_last_pil    = None   # keep last raw PIL frame for snapshots
         self._cam_after_id    = None   # root.after handle for UI poll
         self._cam_status      = tk.StringVar(value="Disconnected")
         self._cam_fps_counter = 0
@@ -680,7 +681,6 @@ class PlotterControlGUI:
         hdr.pack_propagate(False)
         tk.Label(hdr, text="IP CAMERA", bg="#1a1d27", fg="#4f8ef7",
                  font=("Courier New", 9, "bold")).pack(side=tk.LEFT, padx=8, pady=7)
-        # live indicator dot (animated via _cam_tick)
         self._cam_dot = tk.Canvas(hdr, width=10, height=10,
                                   bg="#1a1d27", highlightthickness=0)
         self._cam_dot.pack(side=tk.RIGHT, padx=8, pady=11)
@@ -699,7 +699,6 @@ class PlotterControlGUI:
                              font=("Courier New", 9),
                              relief=tk.FLAT, bd=0)
         url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), pady=6)
-        # placeholder hint
         self._set_placeholder(url_entry, "http://192.168.1.x/video")
 
         # ── Connect / Disconnect buttons ──────────────────────────────────────
@@ -730,7 +729,6 @@ class PlotterControlGUI:
                                      width=self.CAM_W, height=self.CAM_H,
                                      bg="#0a0c12", highlightthickness=0)
         self._cam_canvas.pack()
-        # placeholder text
         self._cam_canvas.create_text(
             self.CAM_W // 2, self.CAM_H // 2,
             text="No feed", fill="#374151",
@@ -794,7 +792,7 @@ class PlotterControlGUI:
     def _cam_connect(self):
         url = self._cam_url.get().strip()
         if not url or url == "http://192.168.1.x/video":
-            messagebox.showwarning("Camera", "Please enter an RTSP camera URL.")
+            messagebox.showwarning("Camera", "Please enter a valid camera URL.")
             return
         if self._cam_running:
             self._cam_stop_thread()
@@ -816,7 +814,6 @@ class PlotterControlGUI:
         self._cam_connect_btn.config(state=tk.NORMAL)
         self._cam_disconnect_btn.config(state=tk.DISABLED)
         self._cam_dot.itemconfig("dot", fill="#374151")
-        # clear canvas
         self._cam_canvas.delete("all")
         self._cam_canvas.create_text(
             self.CAM_W // 2, self.CAM_H // 2,
@@ -828,7 +825,6 @@ class PlotterControlGUI:
         if self._cam_after_id:
             self.root.after_cancel(self._cam_after_id)
             self._cam_after_id = None
-        # drain queue
         while not self._cam_frame_queue.empty():
             try:
                 self._cam_frame_queue.get_nowait()
@@ -836,6 +832,8 @@ class PlotterControlGUI:
                 break
 
     def _cam_push_frame_pil(self, img: Image.Image):
+        # Save a full-resolution copy for snapshots before thumbnailing
+        self._cam_last_pil = img.copy()
         img.thumbnail((self.CAM_W, self.CAM_H), Image.Resampling.LANCZOS)
         if self._cam_frame_queue.full():
             try:
@@ -843,43 +841,43 @@ class PlotterControlGUI:
             except queue.Empty:
                 pass
         self._cam_frame_queue.put_nowait(img)
-        
+
     def _cam_on_connect_failed(self):
-    """Called on main thread when camera connection fails."""
+        """Called on the main thread when the camera connection fails or drops."""
         self._cam_dot.itemconfig("dot", fill="#ef4444")
         self._cam_connect_btn.config(state=tk.NORMAL)
         self._cam_disconnect_btn.config(state=tk.DISABLED)
 
     def _cam_rtsp_loop(self, url: str):
         cap = cv2.VideoCapture()
-        
-        # Set open timeout to 8 seconds instead of the default 30s
+
+        # Reduce connection timeout from the default 30s to 8s
         cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000)
         cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
-        
+
         opened = cap.open(url)
-        
+
         if not opened or not cap.isOpened():
-            self._cam_status.set("Error: could not connect")
+            # Use root.after so StringVar is set from the main thread
+            self.root.after(0, lambda: self._cam_status.set("Error: could not connect"))
             self._cam_running = False
-            # Re-enable buttons from the main thread
             self.root.after(0, self._cam_on_connect_failed)
             return
-        
-        self._cam_status.set("Connected — waiting for frames…")
-        
+
+        self.root.after(0, lambda: self._cam_status.set("Connected — waiting for frames…"))
+
         while self._cam_running:
             ret, frame = cap.read()
             if not ret:
                 if self._cam_running:
-                    self._cam_status.set("Error: stream lost")
+                    self.root.after(0, lambda: self._cam_status.set("Error: stream lost"))
                     self._cam_running = False
                     self.root.after(0, self._cam_on_connect_failed)
                 break
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(frame_rgb)
             self._cam_push_frame_pil(img)
-        
+
         cap.release()
 
     # ── UI poll: drain queue → update canvas (runs on main thread) ────────────
@@ -904,9 +902,6 @@ class PlotterControlGUI:
         if updated:
             self._cam_status.set("Live")
             self._cam_dot.itemconfig("dot", fill="#22c55e")
-        elif self._cam_running:
-            # if no frame for a while show waiting indicator
-            pass
 
         # Update FPS counter every second
         now = time.time()
@@ -929,7 +924,7 @@ class PlotterControlGUI:
     # ── Snapshot ──────────────────────────────────────────────────────────────
 
     def _cam_snapshot(self):
-        if self._cam_photo is None:
+        if self._cam_last_pil is None:
             messagebox.showinfo("Snapshot", "No camera frame available yet.")
             return
         filepath = filedialog.asksaveasfilename(
@@ -941,14 +936,8 @@ class PlotterControlGUI:
         if not filepath:
             return
         try:
-            url = self._cam_url.get().strip()
-            cap = cv2.VideoCapture(url)
-            ret, frame = cap.read()
-            cap.release()
-            if not ret:
-                raise RuntimeError("Could not grab frame from stream")
-            img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            img.save(filepath)
+            # Save the last received PIL frame directly — no new VideoCapture needed
+            self._cam_last_pil.save(filepath)
             messagebox.showinfo("Snapshot", f"Frame saved to:\n{filepath}")
         except Exception as e:
             messagebox.showerror("Snapshot Error", str(e))
