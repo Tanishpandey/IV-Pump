@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-plotter_gui.py — Runs on your LAPTOP
+plotter_control_combined.py — Runs on your LAPTOP
 Full GUI that sends commands to the Pi over MQTT (WiFi).
 
 Install dependencies on laptop:
     pip install paho-mqtt pillow opencv-python
 
 Run:
-    python3 plotter_gui.py
+    python3 plotter_control_combined.py
 
 Make sure pi_agent.py is running on the Pi first.
 """
@@ -32,7 +32,7 @@ from PIL import Image, ImageTk
 # MQTT settings — change PI_IP to your Raspberry Pi's IP address
 # ============================================================================
 
-PI_IP        = "192.168.1.45"   # ← CHANGE THIS to your Pi's IP (run `hostname -I` on Pi)
+PI_IP        = "104.39.88.253"   # ← CHANGE THIS to your Pi's IP (run `hostname -I` on Pi)
 BROKER_PORT  = 1883
 
 TOPIC_COMMANDS = "plotter/commands"

@@ -109,10 +109,15 @@ class XYPlotter:
 
         pin_factory = None
         try:
-            pin_factory = PiGPIOFactory()
-        except Exception:
-            warnings.filterwarnings('ignore', category=UserWarning,
-                                    message='.*PWMSoftwareFallback.*')
+            from gpiozero.pins.lgpio import LGPIOFactory
+            pin_factory = LGPIOFactory()
+            print("[gpio] Using lgpio backend")
+        except Exception as e:
+            print(f"[gpio] lgpio failed: {e}, trying pigpio...")
+            try:
+                pin_factory = PiGPIOFactory()
+            except Exception as e2:
+                print(f"[gpio] pigpio also failed: {e2}, using default")
 
         self.servo1 = AngularServo(servo1_pin, min_angle=0,
                                    max_angle=servo_tics_per_revolution,
