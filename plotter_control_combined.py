@@ -32,7 +32,8 @@ from PIL import Image, ImageTk
 # MQTT settings — change PI_IP to your Raspberry Pi's IP address
 # ============================================================================
 
-PI_IP        = "104.39.88.253"   # ← CHANGE THIS to your Pi's IP (run `hostname -I` on Pi)
+# PI_IP        = "10.53.180.29"   # ← CHANGE THIS to your Pi's IP (run `hostname -I` on Pi)
+PI_IP = "104.39.14.215"
 BROKER_PORT  = 1883
 
 TOPIC_COMMANDS = "plotter/commands"

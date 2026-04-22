@@ -42,7 +42,7 @@ PLOTTER_CONFIG = {
     'x_pulley_radius_mm':    12.58,
     'y_pulley_radius_mm':    12.58,
     'x_tics_per_revolution': 200,
-    'y_tics_per_revolution': 200,
+    'y_tics_per_revolution': 257,
     'servo1_pin':            18,
     'servo2_pin':            19,
     'servo_gear_radius_mm':  5.0,
@@ -360,12 +360,17 @@ class MockXYPlotter:
         self.current_y_mm     = 0.0
         self.x_max_mm         = 300.0
         self.y_max_mm         = 200.0
-        self.servo1_position  = 90.0
-        self.servo2_position  = 90.0
+        self.servo1_position  = 0.0
+        self.servo2_position  = 0.0
+
         self.servo1_offset_x_mm = -20.0
         self.servo1_offset_y_mm = 0.0
         self.servo2_offset_x_mm = 35.0
         self.servo2_offset_y_mm = 0.0
+        shift = (self.servo2_offset_x_mm + self.servo1_offset_x_mm) / 2
+
+        self.servo1_offset_x_mm -= shift
+        self.servo2_offset_x_mm -= shift
 
     def home_and_calibrate(self, **_):
         print("[mock] Homing and calibrating…")
