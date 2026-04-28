@@ -265,9 +265,12 @@ class XYPlotter:
         time.sleep(0.3)
 
     def press_button(self, servo_num, press_distance_mm=5.0, press_duration=0.5):
+        original_angle = (
+        self.servo1_position if servo_num == 1 else self.servo2_position
+        )
         self.move_servo(servo_num, press_distance_mm)
         time.sleep(press_duration)
-        self.move_servo(servo_num, -press_distance_mm)
+        self.set_servo_angle(servo_num, original_angle)
 
     def get_servo_position(self, servo_num):
         if servo_num == 1:
